@@ -290,18 +290,39 @@ def get_video_list_from_api():
     """API'den video listesi al"""
     try:
         print_status("API'den video listesi alınıyor...", "progress")
+        print_status(f"API URL: {API_BASE_URL}/get-video-list", "info")
+        
         response = requests.get(f"{API_BASE_URL}/get-video-list", timeout=30)
         response.raise_for_status()
         
         data = response.json()
-        if data.get("status") == "success":
+        print_status(f"API Response: {json.dumps(data, indent=2, ensure_ascii=False)[:200]}...", "info")
+        
+        status = data.get("status")
+        
+        if status == "success":
             video_lines = data.get("video_list", [])
             list_id = data.get("list_id")
-            print_status(f"API'den {len(video_lines)} video alındı", "success")
+            print_status(f"API'den {len(video_lines)} video alındı (list_id: {list_id})", "success")
             return video_lines, list_id
-        else:
-            print_status("API'den geçersiz response alındı", "error")
+        elif status == "no_more_files":
+            message = data.get("message", "Tüm dosyalar işlendi")
+            print_status(f"📭 {message}", "warning")
+            print_status(f"   Aktif işlemler: {data.get('active_processes', 0)}", "info")
+            print_status(f"   İşlenen dosyalar: {data.get('processed_files', 0)}", "info")
             return [], None
+        else:
+            print_status(f"API'den beklenmeyen status: {status}", "error")
+            print_status(f"Mesaj: {data.get('message', 'N/A')}", "error")
+            return [], None
+    except requests.exceptions.ConnectionError as e:
+        print_status(f"API'ye bağlanılamıyor: {API_BASE_URL}", "error")
+        print_status(f"Lütfen API sunucusunun çalıştığından emin olun", "error")
+        print_status(f"Hata: {e}", "error")
+        return [], None
+    except requests.exceptions.Timeout:
+        print_status(f"API zaman aşımı (30s)", "error")
+        return [], None
     except Exception as e:
         print_status(f"API hatası: {e}", "error")
         return [], None
