@@ -142,6 +142,33 @@ def upload_file_to_s3(file_path, s3_key, file_type="WAV"):
         print(f"  ❌ S3 yükleme hatası ({file_type}): {e}")
         return None
 
+def check_subtitle_availability(video_url):
+    """
+    Altyazı durumunu kontrol et
+    Returns: (has_manual, has_auto, languages)
+    """
+    try:
+        ydl_opts = {'quiet': True, 'no_warnings': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            
+            # Manuel altyazılar
+            manual_subs = info.get('subtitles', {})
+            # Otomatik altyazılar
+            auto_subs = info.get('automatic_captions', {})
+            
+            has_manual = len(manual_subs) > 0
+            has_auto = len(auto_subs) > 0
+            
+            # Mevcut diller
+            manual_langs = list(manual_subs.keys()) if has_manual else []
+            auto_langs = list(auto_subs.keys()) if has_auto else []
+            
+            return has_manual, has_auto, manual_langs, auto_langs
+    except Exception as e:
+        print(f"  ⚠️ Altyazı kontrolü hatası: {e}")
+        return False, False, [], []
+
 def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
     """Video indir (WAV + altyazılar) ve S3'e yükle"""
     time.sleep(random.uniform(1, 3))
@@ -161,6 +188,28 @@ def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
         duration_str = f"{duration//60}:{duration%60:02d}" if duration else "N/A"
         
         print_status(f"[{video_index}/{total_videos}] 📺 {video_title[:50]}... ({duration_str}) - {channel_name}", "info")
+        
+        # ÖNEMLİ: Altyazı kontrolü - Önce bu yapılmalı
+        print(f"  🔍 Altyazı durumu kontrol ediliyor...")
+        has_manual, has_auto, manual_langs, auto_langs = check_subtitle_availability(video_url)
+        
+        subtitle_type = None
+        available_langs = []
+        
+        if has_manual:
+            print(f"  ✅ Kullanıcı altyazısı mevcut: {manual_langs}")
+            subtitle_type = "manual"
+            available_langs = manual_langs
+        elif has_auto:
+            print(f"  🤖 Otomatik altyazı mevcut: {auto_langs}")
+            subtitle_type = "auto"
+            available_langs = auto_langs
+        else:
+            print(f"  ❌ Altyazı bulunamadı - Video atlanıyor")
+            print_status(f"[{video_index}/{total_videos}] ⏭️ Altyazı yok (atlandi): {video_title[:40]}...", "skip")
+            log_to_csv(channel_name, video_url, "skipped", "no_subtitle_available")
+            progress_tracker.update("skipped")
+            return (video_url, True, "no_subtitle", None)
         
         # Güvenli dosya adları
         safe_title = "".join(c if c.isalnum() or c in " -_()" else "_" for c in video_title)[:100]
@@ -191,6 +240,27 @@ def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
         output_template = os.path.join(temp_dir, f"{safe_title}.%(ext)s")
         wav_file_path = os.path.join(temp_dir, f"{safe_title}.wav")
         
+        # Altyazı tercihine göre dil seç (tr öncelikli, sonra en, sonra diğerleri)
+        preferred_lang = None
+        if 'tr' in available_langs:
+            preferred_lang = 'tr'
+        elif 'en' in available_langs:
+            preferred_lang = 'en'
+        else:
+            preferred_lang = available_langs[0] if available_langs else None
+        
+        # Altyazı indirme ayarları
+        ydl_opts_subtitle = {
+            'skip_download': True,
+            'writesubtitles': subtitle_type == "manual",  # Sadece manual varsa
+            'writeautomaticsub': subtitle_type == "auto",  # Sadece auto varsa
+            'subtitleslangs': [preferred_lang] if preferred_lang else ['tr', 'en'],
+            'subtitlesformat': 'srt',
+            'outtmpl': output_template,
+            'quiet': True,
+            'noplaylist': True,
+        }
+        
         # WAV indirme ayarları
         ydl_opts_audio = {
             'format': 'bestaudio/best',
@@ -205,32 +275,57 @@ def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
             'progress_hooks': [progress_hook],
         }
         
-        # Altyazı indirme ayarları
-        ydl_opts_subtitle = {
-            'skip_download': True,
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'subtitleslangs': ['tr', 'en'],  # Türkçe ve İngilizce
-            'subtitlesformat': 'srt',
-            'outtmpl': output_template,
-            'quiet': True,
-            'noplaylist': True,
-        }
+        # 1. Önce altyazıyı indir
+        if not subtitle_exists:
+            subtitle_source = "kullanıcı" if subtitle_type == "manual" else "otomatik"
+            print(f"  📝 Altyazı indiriliyor ({subtitle_source} - {preferred_lang})...")
+            with yt_dlp.YoutubeDL(ydl_opts_subtitle) as ydl:
+                ydl.download([video_url])
+            
+            # Altyazı dosyası indirildi mi kontrol et
+            subtitle_pattern = os.path.join(temp_dir, f"{safe_title}*.srt")
+            subtitle_files = glob.glob(subtitle_pattern)
+            
+            if not subtitle_files:
+                print(f"  ❌ Altyazı indirilemedi - Video atlanıyor")
+                print_status(f"[{video_index}/{total_videos}] ⏭️ Altyazı indirilemedi: {video_title[:40]}...", "skip")
+                log_to_csv(safe_channel, video_url, "skipped", "subtitle_download_failed")
+                progress_tracker.update("skipped")
+                return (video_url, True, "subtitle_failed", None)
         
-        # 1. WAV dosyasını indir
+        # 2. Altyazı başarılıysa, WAV'ı indir
         if not wav_exists:
             print(f"  🎵 WAV indiriliyor: {video_title[:40]}...")
             with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl:
                 ydl.download([video_url])
         
-        # 2. Altyazıları indir
-        if not subtitle_exists:
-            print(f"  📝 Altyazılar indiriliyor...")
-            with yt_dlp.YoutubeDL(ydl_opts_subtitle) as ydl:
-                ydl.download([video_url])
-        
         # S3'e yükleme
         upload_results = {}
+        
+        # Altyazı yükle (önce bu)
+        if not subtitle_exists:
+            subtitle_pattern = os.path.join(temp_dir, f"{safe_title}*.srt")
+            subtitle_files = glob.glob(subtitle_pattern)
+            
+            if subtitle_files:
+                subtitle_file = subtitle_files[0]
+                s3_subtitle_url = upload_file_to_s3(subtitle_file, s3_subtitle_key, "SRT")
+                upload_results['subtitle'] = s3_subtitle_url
+                upload_results['subtitle_type'] = subtitle_type
+                upload_results['subtitle_lang'] = preferred_lang
+                
+                # Tüm altyazı dosyalarını temizle
+                for sf in subtitle_files:
+                    try:
+                        os.remove(sf)
+                    except:
+                        pass
+            else:
+                print(f"  ❌ Altyazı dosyası bulunamadı")
+                upload_results['subtitle'] = None
+        else:
+            upload_results['subtitle'] = f"s3://{S3_BUCKET}/{s3_subtitle_key}"
+            print(f"  ⏭️ Altyazı zaten mevcut")
         
         # WAV yükle
         if os.path.exists(wav_file_path) and not wav_exists:
@@ -241,36 +336,10 @@ def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
             upload_results['wav'] = f"s3://{S3_BUCKET}/{s3_wav_key}"
             print(f"  ⏭️ WAV zaten mevcut")
         
-        # Altyazı dosyalarını bul ve yükle
-        subtitle_pattern = os.path.join(temp_dir, f"{safe_title}*.srt")
-        subtitle_files = glob.glob(subtitle_pattern)
-        
-        if subtitle_files and not subtitle_exists:
-            # İlk bulunan altyazı dosyasını kullan (genellikle tr veya en)
-            subtitle_file = subtitle_files[0]
-            s3_subtitle_url = upload_file_to_s3(subtitle_file, s3_subtitle_key, "SRT")
-            upload_results['subtitle'] = s3_subtitle_url
-            
-            # Tüm altyazı dosyalarını temizle
-            for sf in subtitle_files:
-                try:
-                    os.remove(sf)
-                except:
-                    pass
-        elif subtitle_exists:
-            upload_results['subtitle'] = f"s3://{S3_BUCKET}/{s3_subtitle_key}"
-            print(f"  ⏭️ Altyazı zaten mevcut")
-        else:
-            print(f"  ⚠️ Altyazı bulunamadı")
-            upload_results['subtitle'] = None
-        
         # Sonuç kontrolü
-        if upload_results.get('wav'):
-            status_msg = "WAV"
-            if upload_results.get('subtitle'):
-                status_msg += " + SRT"
-            
-            print_status(f"[{video_index}/{total_videos}] ✅ Başarılı ({status_msg}): {video_title[:40]}...", "success")
+        if upload_results.get('wav') and upload_results.get('subtitle'):
+            sub_info = f"{upload_results.get('subtitle_type', 'unknown')} - {upload_results.get('subtitle_lang', 'unknown')}"
+            print_status(f"[{video_index}/{total_videos}] ✅ Başarılı (WAV + SRT [{sub_info}]): {video_title[:40]}...", "success")
             log_to_csv(safe_channel, video_url, "success", json.dumps(upload_results))
             progress_tracker.update("success")
             return (video_url, True, None, upload_results)
@@ -382,7 +451,10 @@ def download_videos_from_api(max_workers=4):
     
     print_status(f"Toplam {total_videos} video işlenecek", "info")
     print_status(f"Maksimum {max_workers} thread kullanılacak", "info")
-    print_status("WAV + Altyazı indirme aktif", "info")
+    print_status("⚠️ ALTYAZI ÖNCELİKLİ MOD AKTIF", "warning")
+    print_status("  1️⃣ Kullanıcı altyazısı varsa kullan", "info")
+    print_status("  2️⃣ Yoksa otomatik altyazı kullan", "info")
+    print_status("  3️⃣ İkisi de yoksa videoyu atla", "info")
     print_status("İşlem başlatılıyor...", "progress")
     print("-" * 80)
 
@@ -417,14 +489,14 @@ def download_videos_from_api(max_workers=4):
     print(f"⏱️  Toplam süre: {str(elapsed_total).split('.')[0]}")
     print(f"📊 Toplam video: {total_videos}")
     print(f"✅ Başarılı: {progress_tracker.success_count}")
-    print(f"⏭️  Zaten mevcut: {progress_tracker.skipped_count}")
+    print(f"⏭️  Zaten mevcut/Atlanan: {progress_tracker.skipped_count}")
     print(f"❌ Hatalı: {progress_tracker.error_count}")
     
     success_rate = (progress_tracker.success_count / total_videos) * 100 if total_videos > 0 else 0
     print(f"📈 Başarı oranı: {success_rate:.1f}%")
 
     # API'ye bildir
-    message = f"Processed: {progress_tracker.success_count} new, {progress_tracker.skipped_count} existing, {progress_tracker.error_count} errors (WAV+SRT)"
+    message = f"Processed: {progress_tracker.success_count} new, {progress_tracker.skipped_count} skipped/existing, {progress_tracker.error_count} errors (WAV+SRT Priority)"
     final_status = "completed" if progress_tracker.error_count == 0 else "partial"
     notify_api_completion(list_id, final_status, message)
     
