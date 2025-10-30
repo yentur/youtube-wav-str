@@ -67,7 +67,7 @@ progress_tracker = None
 def print_header():
     """Başlık yazdır"""
     print("=" * 80)
-    print("🎵 YOUTUBE VIDEO DOWNLOADER & S3 UPLOADER (WAV + SUBTITLES)")
+    print("🎵 YOUTUBE VIDEO DOWNLOADER & S3 UPLOADER (WAV 16kHz + SUBTITLES)")
     print("=" * 80)
 
 def print_status(message, status_type="info"):
@@ -170,7 +170,7 @@ def check_subtitle_availability(video_url):
         return False, False, [], []
 
 def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
-    """Video indir (WAV + altyazılar) ve S3'e yükle"""
+    """Video indir (WAV 16kHz + altyazılar) ve S3'e yükle"""
     time.sleep(random.uniform(1, 3))
     
     try:
@@ -261,7 +261,7 @@ def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
             'noplaylist': True,
         }
         
-        # WAV indirme ayarları
+        # WAV indirme ayarları - 16kHz sample rate ile
         ydl_opts_audio = {
             'format': 'bestaudio/best',
             'outtmpl': output_template,
@@ -270,6 +270,9 @@ def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
                 'preferredcodec': 'wav',
                 'preferredquality': '192',
             }],
+            'postprocessor_args': [
+                '-ar', '16000',  # Sample rate 16kHz
+            ],
             'quiet': True,
             'noplaylist': True,
             'progress_hooks': [progress_hook],
@@ -293,9 +296,9 @@ def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
                 progress_tracker.update("skipped")
                 return (video_url, True, "subtitle_failed", None)
         
-        # 2. Altyazı başarılıysa, WAV'ı indir
+        # 2. Altyazı başarılıysa, WAV'ı indir (16kHz)
         if not wav_exists:
-            print(f"  🎵 WAV indiriliyor: {video_title[:40]}...")
+            print(f"  🎵 WAV indiriliyor (16kHz): {video_title[:40]}...")
             with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl:
                 ydl.download([video_url])
         
@@ -329,17 +332,19 @@ def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
         
         # WAV yükle
         if os.path.exists(wav_file_path) and not wav_exists:
-            s3_wav_url = upload_file_to_s3(wav_file_path, s3_wav_key, "WAV")
+            s3_wav_url = upload_file_to_s3(wav_file_path, s3_wav_key, "WAV (16kHz)")
             upload_results['wav'] = s3_wav_url
+            upload_results['sample_rate'] = '16000'
             os.remove(wav_file_path)
         elif wav_exists:
             upload_results['wav'] = f"s3://{S3_BUCKET}/{s3_wav_key}"
+            upload_results['sample_rate'] = '16000'
             print(f"  ⏭️ WAV zaten mevcut")
         
         # Sonuç kontrolü
         if upload_results.get('wav') and upload_results.get('subtitle'):
             sub_info = f"{upload_results.get('subtitle_type', 'unknown')} - {upload_results.get('subtitle_lang', 'unknown')}"
-            print_status(f"[{video_index}/{total_videos}] ✅ Başarılı (WAV + SRT [{sub_info}]): {video_title[:40]}...", "success")
+            print_status(f"[{video_index}/{total_videos}] ✅ Başarılı (WAV 16kHz + SRT [{sub_info}]): {video_title[:40]}...", "success")
             log_to_csv(safe_channel, video_url, "success", json.dumps(upload_results))
             progress_tracker.update("success")
             return (video_url, True, None, upload_results)
@@ -452,6 +457,7 @@ def download_videos_from_api(max_workers=4):
     print_status(f"Toplam {total_videos} video işlenecek", "info")
     print_status(f"Maksimum {max_workers} thread kullanılacak", "info")
     print_status("⚠️ ALTYAZI ÖNCELİKLİ MOD AKTIF", "warning")
+    print_status("🎵 SES: 16kHz Sample Rate", "info")
     print_status("  1️⃣ Kullanıcı altyazısı varsa kullan", "info")
     print_status("  2️⃣ Yoksa otomatik altyazı kullan", "info")
     print_status("  3️⃣ İkisi de yoksa videoyu atla", "info")
@@ -496,7 +502,7 @@ def download_videos_from_api(max_workers=4):
     print(f"📈 Başarı oranı: {success_rate:.1f}%")
 
     # API'ye bildir
-    message = f"Processed: {progress_tracker.success_count} new, {progress_tracker.skipped_count} skipped/existing, {progress_tracker.error_count} errors (WAV+SRT Priority)"
+    message = f"Processed: {progress_tracker.success_count} new, {progress_tracker.skipped_count} skipped/existing, {progress_tracker.error_count} errors (WAV 16kHz+SRT Priority)"
     final_status = "completed" if progress_tracker.error_count == 0 else "partial"
     notify_api_completion(list_id, final_status, message)
     
