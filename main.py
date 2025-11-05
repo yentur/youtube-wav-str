@@ -244,8 +244,6 @@ def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
         preferred_lang = None
         if 'tr' in available_langs:
             preferred_lang = 'tr'
-        elif 'en' in available_langs:
-            preferred_lang = 'en'
         else:
             preferred_lang = available_langs[0] if available_langs else None
         
@@ -254,7 +252,7 @@ def download_and_upload_video(video_url, temp_dir, video_index, total_videos):
             'skip_download': True,
             'writesubtitles': subtitle_type == "manual",  # Sadece manual varsa
             'writeautomaticsub': subtitle_type == "auto",  # Sadece auto varsa
-            'subtitleslangs': [preferred_lang] if preferred_lang else ['tr', 'en'],
+            'subtitleslangs': [preferred_lang] if preferred_lang else ['tr'],
             'subtitlesformat': 'srt',
             'outtmpl': output_template,
             'quiet': True,
